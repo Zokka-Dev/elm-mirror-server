@@ -157,14 +157,15 @@ def get_package_status(registry: dict, package_id: str) -> str | None:
     return None
 
 
-def set_package_status(registry: dict, package_id: str, status: str) -> None:
+def set_package_status(registry: dict, package_id: str, status: str, details: str = "") -> None:
     """Set the status of a package, adding it if not present."""
     for pkg in registry["packages"]:
         if pkg["id"] == package_id:
             pkg["status"] = status
+            pkg["details"] = details
             return
     # Not found, add it
-    registry["packages"].append({"id": package_id, "status": status})
+    registry["packages"].append({"id": package_id, "status": status, "details": details})
 
 
 def parse_package_id(package_id: str) -> tuple[str, str, str]:
@@ -349,16 +350,33 @@ def sync_package(
         # Verify hash
         actual_hash = compute_sha1(zip_path)
         if actual_hash != expected_hash:
-            print(f"  Hash mismatch for {package_id}: expected {expected_hash}, got {actual_hash}")
-            set_package_status(registry, package_id, STATUS_FAILED)
+            details = f"Hash mismatch: expected {expected_hash}, got {actual_hash}"
+            print(f"  {details}")
+            set_package_status(registry, package_id, STATUS_IGNORED, details)
             return False
 
         set_package_status(registry, package_id, STATUS_SUCCESS)
         return True
 
+    except urllib.error.HTTPError as e:
+        # Differentiate between temporary and permanent errors
+        if e.code >= 500:
+            # 5xx errors are temporary server errors - mark as FAILED to retry later
+            details = f"HTTP {e.code}: {e.reason}"
+            print(f"  Error syncing {package_id}: {details}")
+            set_package_status(registry, package_id, STATUS_FAILED, details)
+        else:
+            # 4xx errors (including 404) are permanent - mark as IGNORED
+            details = f"HTTP {e.code}: {e.reason}"
+            print(f"  Error syncing {package_id}: {details}")
+            set_package_status(registry, package_id, STATUS_IGNORED, details)
+        return False
+
     except Exception as e:
-        print(f"  Error syncing {package_id}: {e}")
-        set_package_status(registry, package_id, STATUS_FAILED)
+        # Unknown errors - mark as FAILED to retry later (could be transient network issues)
+        details = f"{type(e).__name__}: {e}"
+        print(f"  Error syncing {package_id}: {details}")
+        set_package_status(registry, package_id, STATUS_FAILED, details)
         return False
 
 
@@ -403,33 +421,35 @@ def run_sync(
     new_packages = []
     for pkg_id in remote_packages:
         if pkg_id not in existing_ids:
+            # When a package list is provided, only add packages that match the list
+            # Packages outside the list are implicitly ignored (not tracked in registry)
+            if package_list is not None and not should_sync_package(pkg_id, package_list):
+                continue
             # Add to registry as pending
-            registry["packages"].insert(0, {"id": pkg_id, "status": STATUS_PENDING})
+            registry["packages"].insert(0, {"id": pkg_id, "status": STATUS_PENDING, "details": ""})
             existing_ids.add(pkg_id)
             new_packages.append(pkg_id)
 
     print(f"Found {len(new_packages)} new packages to sync")
 
     # Also find packages that previously failed and should be retried
-    failed_packages = [
+    failed_packages = set(
         pkg["id"] for pkg in registry["packages"]
         if pkg["status"] == STATUS_FAILED
-    ]
+    )
     print(f"Found {len(failed_packages)} previously failed packages to retry")
 
     # Combine new and failed packages for syncing
-    packages_to_sync = new_packages + failed_packages
+    packages_to_sync = new_packages + list(failed_packages)
 
     # Filter by package list if provided
+    # Note: we only filter, we don't mark packages as IGNORED here.
+    # The "ignored" status is reserved for packages we tried to sync but failed permanently.
     if package_list is not None:
-        filtered = []
-        for pkg_id in packages_to_sync:
-            if should_sync_package(pkg_id, package_list):
-                filtered.append(pkg_id)
-            else:
-                # Mark as ignored if not in package list
-                set_package_status(registry, pkg_id, STATUS_IGNORED)
-        packages_to_sync = filtered
+        packages_to_sync = [
+            pkg_id for pkg_id in packages_to_sync
+            if should_sync_package(pkg_id, package_list)
+        ]
         print(f"After filtering by package list: {len(packages_to_sync)} packages to sync")
 
     # Sync packages
@@ -437,7 +457,10 @@ def run_sync(
     fail_count = 0
 
     for i, pkg_id in enumerate(packages_to_sync, 1):
-        print(f"[{i}/{len(packages_to_sync)}] Syncing {pkg_id}...")
+        if pkg_id in failed_packages:
+            print(f"[{i}/{len(packages_to_sync)}] Retrying {pkg_id}...")
+        else:
+            print(f"[{i}/{len(packages_to_sync)}] Syncing {pkg_id}...")
 
         if sync_package(mirror_dir, pkg_id, registry, github_token, rate_limiter):
             success_count += 1
