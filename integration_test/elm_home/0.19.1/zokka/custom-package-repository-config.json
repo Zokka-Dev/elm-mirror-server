@@ -1,0 +1,10 @@
+{
+    "repositories": [
+        {
+            "repository-type": "package-server-with-standard-elm-v0.19-package-server-api",
+            "repository-url": "http://localhost:8765",
+            "repository-local-name": "local-mirror"
+        }
+    ],
+    "single-package-locations": []
+}

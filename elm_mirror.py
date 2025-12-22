@@ -590,7 +590,12 @@ class ElmMirrorApp:
         with self.registry_lock:
             status = get_package_status(self.registry, package_id)
 
-        if status == STATUS_PENDING:
+        if status is None:
+            return self._error_response(
+                start_response, 503,
+                f"Package {package_id} is not available on this mirror"
+            )
+        elif status == STATUS_PENDING:
             return self._error_response(
                 start_response, 503,
                 f"Package {package_id} has not been downloaded yet"
