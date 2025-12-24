@@ -47,13 +47,13 @@ STATUS_IGNORED = "ignored"
 
 
 # =============================================================================
-# GitHub Rate Limiter
+# Rate Limiter
 # =============================================================================
 
 
-class GitHubRateLimiter:
+class RateLimiter:
     """
-    Rate limiter for GitHub API requests.
+    Rate limiter for HTTP requests.
 
     Implements a sliding window rate limiter that tracks request timestamps
     and sleeps when necessary to stay under the configured rate limit.
@@ -227,9 +227,13 @@ def should_sync_package(package_id: str, package_list: set[str] | None) -> bool:
 def fetch_url(
     url: str,
     timeout: int = 30,
-    extra_headers: dict[str, str] | None = None
+    extra_headers: dict[str, str] | None = None,
+    rate_limiter: RateLimiter | None = None
 ) -> bytes:
     """Fetch a URL and return the response body as bytes."""
+    if rate_limiter:
+        rate_limiter.wait_if_needed()
+
     headers = {"User-Agent": "elm-mirror-server/1.0"}
     if extra_headers:
         headers.update(extra_headers)
@@ -239,9 +243,13 @@ def fetch_url(
         return response.read()
 
 
-def fetch_json(url: str, timeout: int = 30) -> any:
+def fetch_json(
+    url: str,
+    timeout: int = 30,
+    rate_limiter: RateLimiter | None = None
+) -> any:
     """Fetch a URL and parse the response as JSON."""
-    data = fetch_url(url, timeout)
+    data = fetch_url(url, timeout, rate_limiter=rate_limiter)
     return json.loads(data.decode("utf-8"))
 
 
@@ -250,35 +258,48 @@ def fetch_json(url: str, timeout: int = 30) -> any:
 # =============================================================================
 
 
-def fetch_all_packages_since(since: int = 0) -> list[str]:
+def fetch_all_packages_since(
+    since: int = 0,
+    rate_limiter: RateLimiter | None = None
+) -> list[str]:
     """Fetch the list of all packages from the Elm package server."""
     url = f"{ELM_PACKAGE_SERVER}/all-packages/since/{since}"
-    return fetch_json(url)
+    return fetch_json(url, rate_limiter=rate_limiter)
 
 
-def fetch_all_packages() -> dict[str, list[str]]:
+def fetch_all_packages(rate_limiter: RateLimiter | None = None) -> dict[str, list[str]]:
     """Fetch the all-packages index (name -> versions mapping)."""
     url = f"{ELM_PACKAGE_SERVER}/all-packages"
-    return fetch_json(url)
+    return fetch_json(url, rate_limiter=rate_limiter)
 
 
-def fetch_package_endpoint(author: str, name: str, version: str) -> dict:
+def fetch_package_endpoint(
+    author: str,
+    name: str,
+    version: str,
+    rate_limiter: RateLimiter | None = None
+) -> dict:
     """Fetch the endpoint.json for a package."""
     url = f"{ELM_PACKAGE_SERVER}/packages/{author}/{name}/{version}/endpoint.json"
-    return fetch_json(url)
+    return fetch_json(url, rate_limiter=rate_limiter)
 
 
-def fetch_package_elm_json(author: str, name: str, version: str) -> dict:
+def fetch_package_elm_json(
+    author: str,
+    name: str,
+    version: str,
+    rate_limiter: RateLimiter | None = None
+) -> dict:
     """Fetch the elm.json for a package."""
     url = f"{ELM_PACKAGE_SERVER}/packages/{author}/{name}/{version}/elm.json"
-    return fetch_json(url)
+    return fetch_json(url, rate_limiter=rate_limiter)
 
 
 def download_package_zip(
     zip_url: str,
     dest_path: Path,
     github_token: str | None = None,
-    rate_limiter: GitHubRateLimiter | None = None
+    rate_limiter: RateLimiter | None = None
 ) -> None:
     """Download a package zip file to the destination path."""
     extra_headers = None
@@ -287,11 +308,7 @@ def download_package_zip(
     if github_token and "github.com" in zip_url:
         extra_headers = {"Authorization": f"Bearer {github_token}"}
 
-        # Apply rate limiting for GitHub requests
-        if rate_limiter:
-            rate_limiter.wait_if_needed()
-
-    data = fetch_url(zip_url, timeout=120, extra_headers=extra_headers)
+    data = fetch_url(zip_url, timeout=120, extra_headers=extra_headers, rate_limiter=rate_limiter)
 
     # Write to temp file first, then rename for atomicity
     temp_path = dest_path.with_suffix(".zip.tmp")
@@ -314,7 +331,7 @@ def sync_package(
     package_id: str,
     registry: dict,
     github_token: str | None = None,
-    rate_limiter: GitHubRateLimiter | None = None
+    rate_limiter: RateLimiter | None = None
 ) -> bool:
     """
     Sync a single package. Returns True on success, False on failure.
@@ -328,7 +345,7 @@ def sync_package(
         package_dir.mkdir(parents=True, exist_ok=True)
 
         # Fetch endpoint.json to get zip URL and hash
-        endpoint = fetch_package_endpoint(author, name, version)
+        endpoint = fetch_package_endpoint(author, name, version, rate_limiter)
         zip_url = endpoint["url"]
         expected_hash = endpoint["hash"]
 
@@ -338,7 +355,7 @@ def sync_package(
             json.dump({"hash": expected_hash}, f)
 
         # Fetch and save elm.json
-        elm_json = fetch_package_elm_json(author, name, version)
+        elm_json = fetch_package_elm_json(author, name, version, rate_limiter)
         elm_json_path = package_dir / "elm.json"
         with open(elm_json_path, "w", encoding="utf-8") as f:
             json.dump(elm_json, f, indent=4)
@@ -389,8 +406,8 @@ def run_sync(
     """Run a full sync operation."""
     print("Starting sync...")
 
-    # Set up rate limiter for GitHub requests
-    rate_limiter = GitHubRateLimiter(github_rate_limit) if github_rate_limit > 0 else None
+    # Set up rate limiter for all HTTP requests
+    rate_limiter = RateLimiter(github_rate_limit) if github_rate_limit > 0 else None
 
     if github_token:
         print(f"Using GitHub authentication (rate limit: {github_rate_limit}/hour)")
@@ -406,12 +423,12 @@ def run_sync(
 
     # Fetch current package list from Elm server
     print("Fetching package list from Elm package server...")
-    remote_packages = fetch_all_packages_since(0)
+    remote_packages = fetch_all_packages_since(0, rate_limiter)
     print(f"Found {len(remote_packages)} packages on remote server")
 
     # Fetch and save all-packages index
     print("Fetching all-packages index...")
-    all_packages = fetch_all_packages()
+    all_packages = fetch_all_packages(rate_limiter)
     all_packages_path = mirror_dir / "all-packages"
     with open(all_packages_path, "w", encoding="utf-8") as f:
         json.dump(all_packages, f)
@@ -486,7 +503,7 @@ def run_sync(
     print(f"\nSync complete: {success_count} succeeded, {fail_count} failed")
     if rate_limiter:
         stats = rate_limiter.get_stats()
-        print(f"GitHub requests this session: {stats['requests_last_hour']}")
+        print(f"HTTP requests this session: {stats['requests_last_hour']}")
 
 
 # =============================================================================
