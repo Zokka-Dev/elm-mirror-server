@@ -6,8 +6,8 @@ A Python script to create and serve a read-only mirror of the Elm package server
 Supports syncing packages, serving them via HTTP, and verifying integrity.
 
 Usage:
-    python elm_mirror.py sync [--mirror-content DIR] [--package-list FILE] [--github-token TOKEN] [--github-rate-limit N]
-    python elm_mirror.py serve --base-url URL [--mirror-content DIR] [--port PORT] [--host HOST] [--sync-interval SECS] [--package-list FILE] [--github-token TOKEN] [--github-rate-limit N]
+    python elm_mirror.py sync [--mirror-content DIR] [--package-list FILE] [--github-token TOKEN] [--github-rate-limit N] [--incremental-sync]
+    python elm_mirror.py serve --base-url URL [--mirror-content DIR] [--port PORT] [--host HOST] [--sync-interval SECS] [--package-list FILE] [--github-token TOKEN] [--github-rate-limit N] [--incremental-sync]
     python elm_mirror.py verify [--mirror-content DIR]
 
 Environment Variables:
@@ -376,12 +376,22 @@ def sync_package(
         return True
 
     except urllib.error.HTTPError as e:
+        # Read response body to check for specific error messages
+        response_body = e.read().decode("utf-8", errors="replace")
+
         # Differentiate between temporary and permanent errors
         if e.code >= 500:
-            # 5xx errors are temporary server errors - mark as FAILED to retry later
-            details = f"HTTP {e.code} when accessing {e.url}: {e.reason}"
-            print(f"  Error syncing {package_id}: {details}")
-            set_package_status(registry, package_id, STATUS_FAILED, details)
+            # Check if this is a permanently broken package (e.g., old Elm version)
+            # These return 5xx but the error is permanent, not temporary
+            if "does not exist (No such file or directory)" in response_body:
+                details = f"HTTP {e.code} when accessing {e.url}: {e.reason} (permanently broken package)"
+                print(f"  Error syncing {package_id}: {details}")
+                set_package_status(registry, package_id, STATUS_IGNORED, details)
+            else:
+                # Normal 5xx errors are temporary server errors - mark as FAILED to retry later
+                details = f"HTTP {e.code} when accessing {e.url}: {e.reason}"
+                print(f"  Error syncing {package_id}: {details}")
+                set_package_status(registry, package_id, STATUS_FAILED, details)
         else:
             # 4xx errors (including 404) are permanent - mark as IGNORED
             details = f"HTTP {e.code} when accessing {e.url}: {e.reason}"
@@ -401,9 +411,27 @@ def run_sync(
     mirror_dir: Path,
     package_list: set[str] | None,
     github_token: str | None = None,
-    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT
+    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT,
+    incremental: bool = False
 ) -> None:
-    """Run a full sync operation."""
+    """
+    Run a sync operation.
+
+    When incremental=True, uses the /all-packages/since endpoint to only fetch
+    packages added since the last completed sync. This is more efficient than
+    fetching all packages every time.
+
+    Important notes about incremental sync:
+    1. We store the sync checkpoint (the 'since' value from the Elm server) as a
+       separate field in registry.json rather than deriving it from the number of
+       packages. This is because we might only sync a subset of packages (via
+       --package-list), which would cause the package count to be far lower than
+       what's on the main Elm server.
+    2. The sync_checkpoint is only updated after a sync completes successfully,
+       so if a sync is interrupted, we'll retry from the same point.
+    3. We always retry failed and pending packages regardless of incremental mode,
+       even if they're not in the 'since' response.
+    """
     print("Starting sync...")
 
     # Set up rate limiter for all HTTP requests
@@ -421,10 +449,30 @@ def run_sync(
     registry = load_registry(mirror_dir)
     existing_ids = {pkg["id"] for pkg in registry["packages"]}
 
+    # Get the sync checkpoint for incremental sync
+    # This is the 'since' value from the last completed sync
+    sync_checkpoint = registry.get("sync_checkpoint", 0)
+
     # Fetch current package list from Elm server
-    print("Fetching package list from Elm package server...")
-    remote_packages = fetch_all_packages_since(0, rate_limiter)
-    print(f"Found {len(remote_packages)} packages on remote server")
+    if incremental and sync_checkpoint > 0:
+        print(f"Incremental sync: fetching packages since checkpoint {sync_checkpoint}...")
+        remote_packages = fetch_all_packages_since(sync_checkpoint, rate_limiter)
+        print(f"Found {len(remote_packages)} new packages since last sync")
+    else:
+        if incremental:
+            print("No sync checkpoint found, falling back to full sync...")
+        print("Fetching package list from Elm package server...")
+        remote_packages = fetch_all_packages_since(0, rate_limiter)
+        print(f"Found {len(remote_packages)} packages on remote server")
+
+    # Calculate the new checkpoint value
+    # The checkpoint is the total number of packages on the server
+    # For a full sync, this is len(remote_packages)
+    # For incremental sync, this is sync_checkpoint + len(remote_packages)
+    if incremental and sync_checkpoint > 0:
+        new_checkpoint = sync_checkpoint + len(remote_packages)
+    else:
+        new_checkpoint = len(remote_packages)
 
     # Fetch and save all-packages index
     print("Fetching all-packages index...")
@@ -450,6 +498,8 @@ def run_sync(
     print(f"Found {len(new_packages)} new packages to sync")
 
     # Also find packages that previously failed or are still pending and should be (re)tried
+    # Note: These are always included regardless of incremental mode, as they might have
+    # been added in a previous sync but not successfully downloaded.
     pending_packages = set(
         pkg["id"] for pkg in registry["packages"]
         if pkg["status"] == STATUS_PENDING
@@ -497,10 +547,15 @@ def run_sync(
         if i % 10 == 0:
             save_registry(mirror_dir, registry)
 
+    # Update the sync checkpoint after successful completion
+    # This ensures that if the sync is interrupted, we'll retry from the same point
+    registry["sync_checkpoint"] = new_checkpoint
+
     # Final save
     save_registry(mirror_dir, registry)
 
     print(f"\nSync complete: {success_count} succeeded, {fail_count} failed")
+    print(f"Sync checkpoint updated to: {new_checkpoint}")
     if rate_limiter:
         stats = rate_limiter.get_stats()
         print(f"HTTP requests this session: {stats['requests_last_hour']}")
@@ -730,15 +785,17 @@ def run_background_sync(
     interval: int,
     app: ElmMirrorApp,
     github_token: str | None = None,
-    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT
+    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT,
+    incremental: bool = False
 ) -> None:
     """Run sync in a background thread at the specified interval."""
     def sync_loop():
         while True:
             time.sleep(interval)
-            print(f"\n[Background sync] Starting sync...")
+            mode = "incremental " if incremental else ""
+            print(f"\n[Background sync] Starting {mode}sync...")
             try:
-                run_sync(mirror_dir, package_list, github_token, github_rate_limit)
+                run_sync(mirror_dir, package_list, github_token, github_rate_limit, incremental)
                 app.reload_registry()
                 print("[Background sync] Complete")
             except Exception as e:
@@ -756,17 +813,19 @@ def run_serve(
     sync_interval: int | None,
     package_list: set[str] | None,
     github_token: str | None = None,
-    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT
+    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT,
+    incremental: bool = False
 ) -> None:
     """Run the WSGI server."""
     app = ElmMirrorApp(mirror_dir, base_url)
 
     # Start background sync if interval is specified
     if sync_interval is not None:
-        print(f"Starting background sync every {sync_interval} seconds")
+        mode = "incremental " if incremental else ""
+        print(f"Starting {mode}background sync every {sync_interval} seconds")
         run_background_sync(
             mirror_dir, package_list, sync_interval, app,
-            github_token, github_rate_limit
+            github_token, github_rate_limit, incremental
         )
 
     # Check if running as CGI
@@ -901,6 +960,14 @@ Use "author/name" to sync all versions, or "author/name@version" for a specific 
         default=DEFAULT_GITHUB_RATE_LIMIT,
         help=f"Maximum GitHub requests per hour (default: {DEFAULT_GITHUB_RATE_LIMIT}). Set to 0 to disable rate limiting."
     )
+    sync_parser.add_argument(
+        "--incremental-sync",
+        action="store_true",
+        help="""Use incremental sync mode. Instead of fetching all packages,
+only fetch packages added since the last completed sync. This is more efficient
+for subsequent syncs but requires at least one full sync to have been completed.
+The sync checkpoint is stored in registry.json and only updated after a successful sync."""
+    )
 
     # serve command
     serve_parser = subparsers.add_parser("serve", help="Serve the mirror via HTTP")
@@ -955,6 +1022,13 @@ Use "author/name" to sync all versions, or "author/name@version" for a specific 
         default=DEFAULT_GITHUB_RATE_LIMIT,
         help=f"Maximum GitHub requests per hour (default: {DEFAULT_GITHUB_RATE_LIMIT}). Set to 0 to disable rate limiting."
     )
+    serve_parser.add_argument(
+        "--incremental-sync",
+        action="store_true",
+        help="""Use incremental sync mode for background syncs. Instead of fetching all packages,
+only fetch packages added since the last completed sync. This is more efficient for periodic syncs.
+The sync checkpoint is stored in registry.json and only updated after a successful sync."""
+    )
 
     # verify command
     verify_parser = subparsers.add_parser("verify", help="Verify mirror integrity")
@@ -980,7 +1054,8 @@ Use "author/name" to sync all versions, or "author/name@version" for a specific 
         run_sync(
             mirror_dir, package_list,
             github_token=github_token,
-            github_rate_limit=args.github_rate_limit
+            github_rate_limit=args.github_rate_limit,
+            incremental=args.incremental_sync
         )
 
     elif args.command == "serve":
@@ -995,7 +1070,8 @@ Use "author/name" to sync all versions, or "author/name@version" for a specific 
             sync_interval=args.sync_interval,
             package_list=package_list,
             github_token=github_token,
-            github_rate_limit=args.github_rate_limit
+            github_rate_limit=args.github_rate_limit,
+            incremental=args.incremental_sync
         )
 
     elif args.command == "verify":
