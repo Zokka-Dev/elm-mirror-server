@@ -874,9 +874,16 @@ def run_serve(
     """Run the WSGI server."""
     app = ElmMirrorApp(mirror_dir, base_url)
 
-    # Start background sync if interval is specified
+    # Perform initial sync and start background sync if interval is specified
     if sync_interval is not None:
         mode = "incremental " if incremental else ""
+        print(f"Performing initial {mode}sync before starting server...")
+        try:
+            run_sync(mirror_dir, package_list, github_token, github_rate_limit, incremental)
+            app.reload_registry()
+            print("Initial sync complete")
+        except Exception as e:
+            print(f"Initial sync failed: {e}")
         print(f"Starting {mode}background sync every {sync_interval} seconds")
         run_background_sync(
             mirror_dir, package_list, sync_interval, app,
