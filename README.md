@@ -150,7 +150,6 @@ npx zokka make src/Main.elm
 - `--base-url URL`: Public URL for the mirror (required)
 - `--port PORT`: Port to listen on (default: 8000)
 - `--sync-interval SECS`: Enable background sync at this interval
-- `--http-rate-limit N`: Maximum HTTP requests per hour for background sync (default: 4000)
 - Other options for `sync` also work for `serve` if `--sync-interval` is set
 
 ## Selective Sync
