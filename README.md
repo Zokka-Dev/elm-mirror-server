@@ -142,7 +142,7 @@ npx zokka make src/Main.elm
 
 **For `sync`:**
 - `--mirror-content DIR`: Where to store packages (default: `.`)
-- `--incremental-sync`: Only fetch new packages since last sync
+- `--incremental-sync`: Don't download the full JSON list of all Elm packages, but only the JSON list of packages since the last sync. Note that even without this flag, we won't re-download packages if they were previously successfully downloaded (to figure this out, the script looks at a file named `registry.json` in your mirror folder). This only changes which initial JSON endpoint we hit for the Elm package server
 - `--package-list FILE`: JSON file to sync specific packages only
 - `--http-rate-limit N`: Maximum HTTP requests per hour (default: 4000). Set to 0 to disable.
 
