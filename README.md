@@ -90,7 +90,7 @@ clients will expect to find packages.
 
 If you would like to make sure that the mirror states up to date with the
 latest Elm packages, you can pass additional arguments to make sure it syncs
-with the main package server in the background. If you do so we would highly
+with the main package server in the background. If you do so we would
 recommend you use `--incremental-sync` to reduce load on the main package
 repository. 
 
