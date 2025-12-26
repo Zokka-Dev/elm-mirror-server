@@ -172,7 +172,7 @@ Without a token, GitHub limits you to 60 requests/hour. With a token, you get
 all endpoints (configurable via `--http-rate-limit`). Hence if you don't use a
 GitHub token, you may quickly run into GitHub rate limiting issues.
 
-Create a token at: **GitHub → Settings → Developer settings → Personal access tokens**
+Create a token at: [https://github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens) (make sure you're logged in)
 
 Note that your token doesn't need *any special permissions*. It just needs to be
 able to read public repositories (which is the minimal set of permissions any
