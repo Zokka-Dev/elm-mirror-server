@@ -141,11 +141,13 @@ npx zokka make src/Main.elm
 - `--mirror-content DIR`: Where to store packages (default: `.`)
 - `--incremental-sync`: Only fetch new packages since last sync
 - `--package-list FILE`: JSON file to sync specific packages only
+- `--http-rate-limit N`: Maximum HTTP requests per hour (default: 4000). Set to 0 to disable.
 
 **For `serve`:**
 - `--base-url URL`: Public URL for the mirror (required)
 - `--port PORT`: Port to listen on (default: 8000)
 - `--sync-interval SECS`: Enable background sync at this interval
+- `--http-rate-limit N`: Maximum HTTP requests per hour for background sync (default: 4000)
 
 ## Selective Sync
 
@@ -164,8 +166,8 @@ python elm_mirror.py sync --package-list packages.json --mirror-content ./mirror
 
 Without a token, GitHub limits you to 60 requests/hour. With a token, you get
 5000/hour. By default, we throttle to 4000 total HTTP requests per hour across
-all endpoints. Hence if you don't use a GitHub token, you may quickly run into
-GitHub rate limiting issues.
+all endpoints (configurable via `--http-rate-limit`). Hence if you don't use a
+GitHub token, you may quickly run into GitHub rate limiting issues.
 
 Create a token at: **GitHub → Settings → Developer settings → Personal access tokens**
 

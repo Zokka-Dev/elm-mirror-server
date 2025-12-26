@@ -6,8 +6,8 @@ A Python script to create and serve a read-only mirror of the Elm package server
 Supports syncing packages, serving them via HTTP, and verifying integrity.
 
 Usage:
-    python elm_mirror.py sync [--mirror-content DIR] [--package-list FILE] [--github-token TOKEN] [--github-rate-limit N] [--incremental-sync]
-    python elm_mirror.py serve --base-url URL [--mirror-content DIR] [--port PORT] [--host HOST] [--sync-interval SECS] [--package-list FILE] [--github-token TOKEN] [--github-rate-limit N] [--incremental-sync]
+    python elm_mirror.py sync [--mirror-content DIR] [--package-list FILE] [--github-token TOKEN] [--http-rate-limit N] [--incremental-sync]
+    python elm_mirror.py serve --base-url URL [--mirror-content DIR] [--port PORT] [--host HOST] [--sync-interval SECS] [--package-list FILE] [--github-token TOKEN] [--http-rate-limit N] [--incremental-sync]
     python elm_mirror.py verify [--mirror-content DIR]
 
 Environment Variables:
@@ -56,7 +56,7 @@ class Registry(TypedDict):
 ELM_PACKAGE_SERVER = "https://package.elm-lang.org"
 DEFAULT_PORT = 8000
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_GITHUB_RATE_LIMIT = 4000  # requests per hour (leaves buffer from 5000 limit)
+DEFAULT_HTTP_RATE_LIMIT = 4000  # requests per hour (leaves buffer from GitHub's 5000 limit)
 
 # Status values for packages
 STATUS_SUCCESS = "success"
@@ -78,7 +78,7 @@ class RateLimiter:
     and sleeps when necessary to stay under the configured rate limit.
     """
 
-    def __init__(self, requests_per_hour: int = DEFAULT_GITHUB_RATE_LIMIT):
+    def __init__(self, requests_per_hour: int = DEFAULT_HTTP_RATE_LIMIT):
         self.requests_per_hour = requests_per_hour
         self.request_timestamps: list[float] = []
         self.lock = threading.Lock()
@@ -458,7 +458,7 @@ def run_sync(
     mirror_dir: Path,
     package_list: set[str] | None,
     github_token: str | None = None,
-    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT,
+    http_rate_limit: int = DEFAULT_HTTP_RATE_LIMIT,
     incremental: bool = False
 ) -> None:
     """
@@ -483,12 +483,12 @@ def run_sync(
     print("Starting sync...")
 
     # Set up rate limiter for all HTTP requests
-    rate_limiter = RateLimiter(github_rate_limit) if github_rate_limit > 0 else None
+    rate_limiter = RateLimiter(http_rate_limit) if http_rate_limit > 0 else None
 
     if github_token:
-        print(f"Using GitHub authentication (rate limit: {github_rate_limit}/hour)")
+        print(f"Using a GitHub authentication token (current HTTP rate limit: {http_rate_limit}/hour, GitHub limits GitHub-specific requests to 5000/hour)")
     else:
-        print("No GitHub token provided (unauthenticated rate limit: 60/hour)")
+        print("No GitHub token provided (current HTTP rate limit: {http_rate_limit}/hour, GitHub limits unauthenticated GitHub-specific requests to 60/hour)")
 
     # Ensure mirror directory exists
     mirror_dir.mkdir(parents=True, exist_ok=True)
@@ -840,7 +840,7 @@ def run_background_sync(
     interval: int,
     app: ElmMirrorApp,
     github_token: str | None = None,
-    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT,
+    http_rate_limit: int = DEFAULT_HTTP_RATE_LIMIT,
     incremental: bool = False
 ) -> None:
     """Run sync in a background thread at the specified interval."""
@@ -850,7 +850,7 @@ def run_background_sync(
             mode = "incremental " if incremental else ""
             print(f"\n[Background sync] Starting {mode}sync...")
             try:
-                run_sync(mirror_dir, package_list, github_token, github_rate_limit, incremental)
+                run_sync(mirror_dir, package_list, github_token, http_rate_limit, incremental)
                 app.reload_registry()
                 print("[Background sync] Complete")
             except Exception as e:
@@ -868,7 +868,7 @@ def run_serve(
     sync_interval: int | None,
     package_list: set[str] | None,
     github_token: str | None = None,
-    github_rate_limit: int = DEFAULT_GITHUB_RATE_LIMIT,
+    http_rate_limit: int = DEFAULT_HTTP_RATE_LIMIT,
     incremental: bool = False
 ) -> None:
     """Run the WSGI server."""
@@ -879,7 +879,7 @@ def run_serve(
         mode = "incremental " if incremental else ""
         print(f"Performing initial {mode}sync before starting server...")
         try:
-            run_sync(mirror_dir, package_list, github_token, github_rate_limit, incremental)
+            run_sync(mirror_dir, package_list, github_token, http_rate_limit, incremental)
             app.reload_registry()
             print("Initial sync complete")
         except Exception as e:
@@ -887,7 +887,7 @@ def run_serve(
         print(f"Starting {mode}background sync every {sync_interval} seconds")
         run_background_sync(
             mirror_dir, package_list, sync_interval, app,
-            github_token, github_rate_limit, incremental
+            github_token, http_rate_limit, incremental
         )
 
     # Check if running as CGI
@@ -1017,10 +1017,10 @@ Use "author/name" to sync all versions, or "author/name@version" for a specific 
         help="GitHub personal access token for authentication (increases rate limit from 60 to 5000/hour). Falls back to GITHUB_TOKEN env var."
     )
     sync_parser.add_argument(
-        "--github-rate-limit",
+        "--http-rate-limit",
         type=int,
-        default=DEFAULT_GITHUB_RATE_LIMIT,
-        help=f"Maximum GitHub requests per hour (default: {DEFAULT_GITHUB_RATE_LIMIT}). Set to 0 to disable rate limiting."
+        default=DEFAULT_HTTP_RATE_LIMIT,
+        help=f"Maximum HTTP requests per hour (default: {DEFAULT_HTTP_RATE_LIMIT}). Set to 0 to disable rate limiting."
     )
     sync_parser.add_argument(
         "--incremental-sync",
@@ -1079,10 +1079,10 @@ Use "author/name" to sync all versions, or "author/name@version" for a specific 
         help="GitHub personal access token for authentication (increases rate limit from 60 to 5000/hour). Falls back to GITHUB_TOKEN env var."
     )
     serve_parser.add_argument(
-        "--github-rate-limit",
+        "--http-rate-limit",
         type=int,
-        default=DEFAULT_GITHUB_RATE_LIMIT,
-        help=f"Maximum GitHub requests per hour (default: {DEFAULT_GITHUB_RATE_LIMIT}). Set to 0 to disable rate limiting."
+        default=DEFAULT_HTTP_RATE_LIMIT,
+        help=f"Maximum HTTP requests per hour (default: {DEFAULT_HTTP_RATE_LIMIT}). Set to 0 to disable rate limiting."
     )
     serve_parser.add_argument(
         "--incremental-sync",
@@ -1116,7 +1116,7 @@ The sync checkpoint is stored in registry.json and only updated after a successf
         run_sync(
             mirror_dir, package_list,
             github_token=github_token,
-            github_rate_limit=args.github_rate_limit,
+            http_rate_limit=args.http_rate_limit,
             incremental=args.incremental_sync
         )
 
@@ -1132,7 +1132,7 @@ The sync checkpoint is stored in registry.json and only updated after a successf
             sync_interval=args.sync_interval,
             package_list=package_list,
             github_token=github_token,
-            github_rate_limit=args.github_rate_limit,
+            http_rate_limit=args.http_rate_limit,
             incremental=args.incremental_sync
         )
 
