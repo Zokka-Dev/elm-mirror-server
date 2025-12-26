@@ -34,6 +34,9 @@ E.g. like so
 ```bash
 # This will create a directory named `mirror` on your local machine that is
 # pre-seeded with all Elm packages up to Dec 24th, 2025
+# Note that for reasons associated with how the `tar.gz` were created, these
+# will always be named `mirror`. The argument to the script only determines its
+# parent directory.
 ./download_preseeded_mirror.sh .
 ```
 
