@@ -279,13 +279,12 @@ def should_sync_package(package_id: str, package_list: set[str] | None) -> bool:
 
 def fetch_url(
     url: str,
+    rate_limiter: RateLimiter,
     timeout: int = 30,
     extra_headers: dict[str, str] | None = None,
-    rate_limiter: RateLimiter | None = None
 ) -> bytes:
     """Fetch a URL and return the response body as bytes."""
-    if rate_limiter:
-        rate_limiter.wait_if_needed()
+    rate_limiter.wait_if_needed()
 
     headers = {"User-Agent": "elm-mirror-server/1.0"}
     if extra_headers:
@@ -298,11 +297,11 @@ def fetch_url(
 
 def fetch_json(
     url: str,
+    rate_limiter: RateLimiter,
     timeout: int = 30,
-    rate_limiter: RateLimiter | None = None
 ) -> any:
     """Fetch a URL and parse the response as JSON."""
-    data = fetch_url(url, timeout, rate_limiter=rate_limiter)
+    data = fetch_url(url, rate_limiter, timeout)
     return json.loads(data.decode("utf-8"))
 
 
@@ -312,8 +311,8 @@ def fetch_json(
 
 
 def fetch_all_packages_since(
-    since: int = 0,
-    rate_limiter: RateLimiter | None = None
+    since: int,
+    rate_limiter: RateLimiter,
 ) -> list[str]:
     """Fetch the list of all packages from the Elm package server."""
     url = f"{ELM_PACKAGE_SERVER}/all-packages/since/{since}"
@@ -355,7 +354,7 @@ def download_package_zip(
     if github_token and "github.com" in zip_url:
         extra_headers = {"Authorization": f"Bearer {github_token}"}
 
-    data = fetch_url(zip_url, timeout=120, extra_headers=extra_headers, rate_limiter=rate_limiter)
+    data = fetch_url(zip_url, rate_limiter, timeout=120, extra_headers=extra_headers)
 
     # Write to temp file first, then rename for atomicity
     temp_path = dest_path.with_suffix(".zip.tmp")
@@ -483,7 +482,7 @@ def run_sync(
     print("Starting sync...")
 
     # Set up rate limiter for all HTTP requests
-    rate_limiter = RateLimiter(http_rate_limit) if http_rate_limit > 0 else None
+    rate_limiter = RateLimiter(http_rate_limit)
 
     if github_token:
         print(f"Using a GitHub authentication token (current HTTP rate limit: {http_rate_limit}/hour, GitHub limits GitHub-specific requests to 5000/hour)")
@@ -611,9 +610,8 @@ def run_sync(
 
     print(f"\nSync complete: {success_count} succeeded, {fail_count} failed")
     print(f"Sync checkpoint updated to: {new_checkpoint}")
-    if rate_limiter:
-        stats = rate_limiter.get_stats()
-        print(f"HTTP requests this session: {stats['requests_last_hour']}")
+    stats = rate_limiter.get_stats()
+    print(f"HTTP requests this session: {stats['requests_last_hour']}")
 
 
 # =============================================================================
