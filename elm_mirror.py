@@ -341,6 +341,17 @@ def fetch_package_elm_json(
     return fetch_json(url, rate_limiter=rate_limiter)
 
 
+def fetch_package_docs(
+    author: str,
+    name: str,
+    version: str,
+    rate_limiter: RateLimiter | None = None
+) -> list:
+    """Fetch the docs.json for a package."""
+    url = f"{ELM_PACKAGE_SERVER}/packages/{author}/{name}/{version}/docs.json"
+    return fetch_json(url, rate_limiter=rate_limiter)
+
+
 def download_package_zip(
     zip_url: str,
     dest_path: Path,
@@ -405,6 +416,12 @@ def sync_package(
         elm_json_path = package_dir / "elm.json"
         with open(elm_json_path, "w", encoding="utf-8") as f:
             json.dump(elm_json, f, indent=4)
+
+        # Fetch and save docs.json
+        docs_json = fetch_package_docs(author, name, version, rate_limiter)
+        docs_json_path = package_dir / "docs.json"
+        with open(docs_json_path, "w", encoding="utf-8") as f:
+            json.dump(docs_json, f)
 
         # Download package zip
         zip_path = package_dir / "package.zip"
@@ -967,6 +984,12 @@ def run_verify(mirror_dir: Path) -> bool:
         elm_json_path = package_dir / "elm.json"
         if not elm_json_path.exists():
             errors.append(f"{package_id}: elm.json missing")
+            continue
+
+        # Check docs.json exists
+        docs_json_path = package_dir / "docs.json"
+        if not docs_json_path.exists():
+            errors.append(f"{package_id}: docs.json missing")
             continue
 
     if errors:

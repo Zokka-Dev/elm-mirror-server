@@ -130,7 +130,7 @@ def test_sync() -> bool:
         name, version = rest.split("@")
         pkg_dir = TEST_MIRROR_DIR / "packages" / author / name / version
 
-        for filename in ["elm.json", "hash.json", "package.zip"]:
+        for filename in ["elm.json", "hash.json", "package.zip", "docs.json"]:
             if not (pkg_dir / filename).exists():
                 print_fail(f"{pkg_id}: {filename} missing")
                 return False
@@ -271,6 +271,22 @@ def test_serve() -> bool:
             print_pass("elm.json served correctly")
         except Exception as e:
             print_fail(f"elm.json failed: {e}")
+            return False
+
+        # Test /packages/<author>/<name>/<version>/docs.json
+        try:
+            docs_json = fetch_json(f"{SERVER_BASE_URL}/packages/elm/core/1.0.5/docs.json")
+            if not isinstance(docs_json, list):
+                print_fail(f"docs.json should be a list, got {type(docs_json)}")
+                return False
+            # Check that it contains module documentation
+            module_names = [m.get("name") for m in docs_json if isinstance(m, dict)]
+            if "Basics" not in module_names:
+                print_fail(f"docs.json missing Basics module: {module_names}")
+                return False
+            print_pass("docs.json served correctly")
+        except Exception as e:
+            print_fail(f"docs.json failed: {e}")
             return False
 
         # Test package.zip download and hash verification
